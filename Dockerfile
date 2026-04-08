@@ -33,9 +33,9 @@ ENV MCP_LOG_LEVEL=INFO
 # Expose the default port
 EXPOSE 8000
 
-# Health check
+# Health check using dedicated /health endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${MCP_PORT}/mcp || exit 1
+    CMD curl -f http://localhost:${MCP_PORT}/health || exit 1
 
 # Run the MCP server
 WORKDIR /app/inkmcp

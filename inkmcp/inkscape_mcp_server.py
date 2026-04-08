@@ -918,12 +918,30 @@ def main():
     elif args.transport == "http":
         # HTTP transport with Streamable HTTP (recommended for remote)
         import uvicorn
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route, Mount
 
         logger.info(f"Running Streamable HTTP server on {args.host}:{args.port}")
         logger.info(f"MCP endpoint: http://{args.host}:{args.port}/mcp")
+        logger.info(f"Health endpoint: http://{args.host}:{args.port}/health")
 
         # Get the Starlette ASGI app for streamable HTTP
-        app = mcp.streamable_http_app()
+        mcp_app = mcp.streamable_http_app()
+
+        # Health check endpoint
+        async def health_check(request):
+            return JSONResponse(
+                {"status": "healthy", "service": "InkscapeMCP", "transport": "http"}
+            )
+
+        # Create combined app with health check and MCP routes
+        app = Starlette(
+            routes=[
+                Route("/health", health_check, methods=["GET"]),
+                Mount("/", app=mcp_app),
+            ]
+        )
 
         uvicorn.run(
             app,
@@ -935,15 +953,33 @@ def main():
     elif args.transport == "sse":
         # SSE transport (legacy, for backward compatibility)
         import uvicorn
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route, Mount
 
         logger.info(f"Running SSE server on {args.host}:{args.port}")
         logger.info(f"SSE endpoint: http://{args.host}:{args.port}/sse")
+        logger.info(f"Health endpoint: http://{args.host}:{args.port}/health")
         logger.info(
             "Note: SSE is legacy. Consider using HTTP transport for new projects."
         )
 
         # Get the Starlette ASGI app for SSE
-        app = mcp.sse_app()
+        sse_mcp_app = mcp.sse_app()
+
+        # Health check endpoint
+        async def health_check(request):
+            return JSONResponse(
+                {"status": "healthy", "service": "InkscapeMCP", "transport": "sse"}
+            )
+
+        # Create combined app with health check and SSE routes
+        app = Starlette(
+            routes=[
+                Route("/health", health_check, methods=["GET"]),
+                Mount("/", app=sse_mcp_app),
+            ]
+        )
 
         uvicorn.run(
             app,
