@@ -5,19 +5,56 @@ Model Context Protocol server for controlling Inkscape via D-Bus extension
 
 Provides access to Inkscape operations through a unified tool interface
 for SVG element creation, document manipulation, and code execution.
+
+Also includes embroidery-specific tools for AI-assisted embroidery design
+creation through Ink/Stitch integration.
+
+Supports multiple transport modes:
+- stdio: Standard input/output (default, for local MCP clients)
+- http: HTTP transport with Streamable HTTP (recommended for remote)
+- sse: Server-Sent Events (legacy, for backward compatibility)
+
+Usage:
+    # Default stdio mode
+    python inkscape_mcp_server.py
+
+    # HTTP mode on default port 8000
+    python inkscape_mcp_server.py --transport http
+
+    # HTTP mode on custom host/port
+    python inkscape_mcp_server.py --transport http --host 0.0.0.0 --port 9000
+
+    # SSE mode (legacy)
+    python inkscape_mcp_server.py --transport sse --port 8000
 """
 
+import argparse
 import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional, Union
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Union
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import ImageContent
+
+# Import embroidery modules
+from embroidery.embroidery_operations import (
+    create_embroidery_shape,
+    list_available_stitch_types,
+    get_stitch_parameters,
+)
+from embroidery.export import (
+    export_embroidery,
+    list_export_formats,
+    check_inkstitch_installation,
+    get_format_info,
+    generate_stitch_simulation,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -408,10 +445,530 @@ def inkscape_operation(ctx: Context, command: str) -> Union[str, ImageContent]:
                 pass
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# EMBROIDERY TOOLS
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def format_embroidery_response(result: Dict[str, Any]) -> str:
+    """Format embroidery operation result for AI client display"""
+    if result.get("status") == "success":
+        data = result.get("data", {})
+        message = data.get("message", "Operation completed successfully")
+        details = []
+
+        # Element creation details
+        if "element" in data:
+            elem = data["element"]
+            details.append(f"**Element ID**: `{elem.get('id', 'unknown')}`")
+            details.append(f"**Tag**: {elem.get('tag', 'path')}")
+
+        if "stitch_type" in data:
+            details.append(f"**Stitch Type**: {data['stitch_type']}")
+
+        if "shape_type" in data:
+            details.append(f"**Shape**: {data['shape_type']}")
+
+        if "command" in data:
+            details.append(f"**InkMCP Command**:\n```\n{data['command']}\n```")
+
+        # Stitch type listing
+        if "stitch_types" in data:
+            details.append(f"**Total**: {len(data['stitch_types'])} stitch types")
+            if "by_category" in data:
+                for cat, stitches in data["by_category"].items():
+                    stitch_names = [s["name"] for s in stitches]
+                    details.append(f"**{cat.title()}**: {', '.join(stitch_names)}")
+
+        # Parameter listing
+        if "supported_params" in data:
+            params = data["supported_params"]
+            details.append(f"**Parameters** ({len(params)} available):")
+            for p in params[:10]:  # Show first 10
+                default = p.get("default", "N/A")
+                unit = f" {p.get('unit')}" if p.get("unit") else ""
+                details.append(
+                    f"  - `{p['name']}`: {p.get('description', '')} (default: {default}{unit})"
+                )
+            if len(params) > 10:
+                details.append(f"  - ... and {len(params) - 10} more")
+
+        # Export details
+        if "output_path" in data:
+            details.append(f"**Output File**: {data['output_path']}")
+        if "format" in data:
+            details.append(
+                f"**Format**: {data.get('format_name', data['format']).upper()}"
+            )
+        if "file_size_kb" in data:
+            details.append(f"**Size**: {data['file_size_kb']} KB")
+
+        # Format listing
+        if "formats" in data:
+            details.append(f"**Available Formats** ({len(data['formats'])}):")
+            popular = data.get("popular", [])
+            for fmt in data["formats"]:
+                marker = "★" if fmt["format"] in popular else " "
+                details.append(
+                    f"  {marker} `{fmt['format']}` - {fmt['name']} ({fmt['manufacturer']})"
+                )
+
+        # Installation check
+        if "inkscape_found" in data:
+            ink_status = "✅" if data["inkscape_found"] else "❌"
+            details.append(
+                f"**Inkscape**: {ink_status} {data.get('inkscape_path', 'Not found')}"
+            )
+        if "inkstitch_found" in data:
+            stitch_status = "✅" if data["inkstitch_found"] else "❌"
+            details.append(
+                f"**Ink/Stitch**: {stitch_status} {data.get('inkstitch_path', 'Not found')}"
+            )
+
+        if details:
+            return f"✅ {message}\n\n" + "\n".join(details)
+        else:
+            return f"✅ {message}"
+
+    else:
+        error = result.get("data", {}).get("error", "Unknown error")
+        extra_info = []
+
+        # Add installation instructions if present
+        if "install_instructions" in result.get("data", {}):
+            instructions = result["data"]["install_instructions"]
+            extra_info.append("\n**Installation Instructions**:")
+            for component, url in instructions.items():
+                extra_info.append(f"  - {component.title()}: {url}")
+
+        return f"❌ {error}" + "\n".join(extra_info)
+
+
+@mcp.tool()
+def embroidery_create_element(
+    ctx: Context,
+    shape_type: str,
+    element_id: str,
+    stitch_type: str,
+    thread_color: str = "#000000",
+    x: float = 0,
+    y: float = 0,
+    width: float = 100,
+    height: float = 100,
+    cx: float = 50,
+    cy: float = 50,
+    r: float = 50,
+    rx: float = 50,
+    ry: float = 30,
+    d: str = "",
+    stitch_length: float = 2.5,
+    fill_angle: float = 0,
+    row_spacing: float = 0.25,
+    underlay: bool = True,
+    label: str = "",
+) -> str:
+    """
+    Create an embroidery element with Ink/Stitch parameters.
+
+    This tool generates SVG path elements configured for embroidery production
+    using Ink/Stitch. The output includes both the element specification and
+    the InkMCP command to create it in Inkscape.
+
+    Parameters:
+        shape_type: Shape to create - "rectangle", "circle", "ellipse", or "path"
+        element_id: Unique ID for the element (required for later modification)
+        stitch_type: Type of stitch to use. Options:
+            - FILL STITCHES: "fill", "auto_fill", "contour_fill", "guided_fill",
+              "meander_fill", "circular_fill", "linear_gradient_fill", "tartan_fill"
+            - STROKE STITCHES: "running_stitch", "bean_stitch", "manual_stitch",
+              "ripple_stitch", "zigzag_stitch"
+            - SATIN STITCHES: "satin_column", "e_stitch", "s_stitch", "zigzag_satin"
+        thread_color: Thread color in hex format (e.g., "#FF0000" for red)
+
+    Shape Parameters (use based on shape_type):
+        Rectangle: x, y, width, height
+        Circle: cx, cy, r
+        Ellipse: cx, cy, rx, ry
+        Path: d (SVG path data string)
+
+    Stitch Parameters:
+        stitch_length: Length of each stitch in mm (default: 2.5)
+        fill_angle: Angle of fill stitches in degrees (default: 0)
+        row_spacing: Spacing between fill rows in mm (default: 0.25)
+        underlay: Add underlay stitches for stability (default: True)
+        label: Optional label for the element
+
+    Returns:
+        Formatted result with element spec and InkMCP command
+
+    Example:
+        Create a filled rectangle:
+        shape_type="rectangle", element_id="my_rect", stitch_type="fill",
+        thread_color="#FF0000", x=100, y=100, width=200, height=150
+
+        Create a satin circle outline:
+        shape_type="circle", element_id="my_circle", stitch_type="running_stitch",
+        thread_color="#0000FF", cx=200, cy=200, r=50
+    """
+    # Build shape params based on shape type
+    shape_params = {"label": label if label else None}
+
+    if shape_type == "rectangle":
+        shape_params.update({"x": x, "y": y, "width": width, "height": height})
+    elif shape_type == "circle":
+        shape_params.update({"cx": cx, "cy": cy, "r": r})
+    elif shape_type == "ellipse":
+        shape_params.update({"cx": cx, "cy": cy, "rx": rx, "ry": ry})
+    elif shape_type == "path":
+        shape_params.update({"d": d})
+
+    # Build stitch params
+    params = {
+        "stitch_length": stitch_length,
+        "fill_angle": fill_angle,
+        "row_spacing": row_spacing,
+    }
+
+    # Add underlay params if enabled
+    if underlay:
+        params["fill_underlay"] = True
+        params["fill_underlay_angle"] = fill_angle + 90  # Perpendicular
+
+    result = create_embroidery_shape(
+        shape_type=shape_type,
+        element_id=element_id,
+        stitch_type=stitch_type,
+        thread_color=thread_color,
+        params=params,
+        **shape_params,
+    )
+
+    return format_embroidery_response(result)
+
+
+@mcp.tool()
+def embroidery_list_stitches(ctx: Context, category: str = "") -> str:
+    """
+    List all available embroidery stitch types.
+
+    Returns comprehensive information about each stitch type including
+    category, description, and requirements.
+
+    Parameters:
+        category: Optional filter by category ("stroke", "satin", "fill")
+                  Leave empty to list all stitch types.
+
+    Stitch Categories:
+        - STROKE: Line-based stitches (running, bean, manual, ripple, zigzag)
+        - SATIN: Column stitches with two rails (satin_column, e_stitch, s_stitch)
+        - FILL: Area-filling stitches (fill, auto_fill, contour_fill, meander, etc.)
+
+    Returns:
+        List of stitch types with descriptions organized by category
+    """
+    result = list_available_stitch_types()
+
+    if category and result.get("status") == "success":
+        # Filter by category if specified
+        cat_lower = category.lower()
+        if "by_category" in result.get("data", {}):
+            filtered = result["data"]["by_category"].get(cat_lower, [])
+            if filtered:
+                result["data"]["stitch_types"] = filtered
+                result["data"]["by_category"] = {cat_lower: filtered}
+                result["data"]["message"] = (
+                    f"Found {len(filtered)} {cat_lower} stitch types"
+                )
+
+    return format_embroidery_response(result)
+
+
+@mcp.tool()
+def embroidery_get_stitch_params(ctx: Context, stitch_type: str) -> str:
+    """
+    Get detailed parameters for a specific stitch type.
+
+    Returns all available parameters that can be configured for the
+    specified stitch type, including defaults, ranges, and descriptions.
+
+    Parameters:
+        stitch_type: Name of the stitch type (e.g., "fill", "satin_column", "running_stitch")
+
+    Returns:
+        Detailed parameter information including:
+        - Parameter name and description
+        - Data type (float, int, bool, etc.)
+        - Default value
+        - Min/max range (if applicable)
+        - Unit of measurement
+
+    Common Parameters by Category:
+        FILL: fill_angle, row_spacing, stitch_length, underlay options
+        SATIN: satin_column width, pull_compensation, zigzag_spacing
+        STROKE: stitch_length, bean_stitch_repeats, running_stitch_tolerance
+    """
+    result = get_stitch_parameters(stitch_type)
+    return format_embroidery_response(result)
+
+
+@mcp.tool()
+def embroidery_export(
+    ctx: Context,
+    svg_path: str,
+    output_path: str,
+    format: str = "dst",
+) -> str:
+    """
+    Export an SVG embroidery design to machine-readable format.
+
+    Converts an SVG file with Ink/Stitch embroidery elements into a format
+    that can be loaded onto embroidery machines.
+
+    Parameters:
+        svg_path: Path to input SVG file with embroidery elements
+        output_path: Path for output embroidery file
+        format: Target format. Popular options:
+            - "dst" - Tajima (most universal commercial format)
+            - "pes" - Brother/Babylock (most popular home format)
+            - "jef" - Janome
+            - "exp" - Melco
+            - "vp3" - Pfaff
+            - "hus" - Husqvarna Viking
+            - "xxx" - Singer
+
+    Requirements:
+        - Inkscape must be installed
+        - Ink/Stitch extension must be installed
+        - Use embroidery_check_setup to verify installation
+
+    Returns:
+        Export result with file path and size
+
+    Example:
+        embroidery_export(
+            svg_path="/path/to/design.svg",
+            output_path="/path/to/output.dst",
+            format="dst"
+        )
+    """
+    result = export_embroidery(svg_path, output_path, format)
+    return format_embroidery_response(result)
+
+
+@mcp.tool()
+def embroidery_list_formats(ctx: Context) -> str:
+    """
+    List all available embroidery export formats.
+
+    Returns information about each supported format including:
+    - Format code (dst, pes, jef, etc.)
+    - File extension
+    - Full name
+    - Manufacturer/brand
+
+    Popular formats are marked with ★ for easy identification.
+
+    Returns:
+        List of all supported embroidery machine formats
+    """
+    result = list_export_formats()
+    return format_embroidery_response(result)
+
+
+@mcp.tool()
+def embroidery_check_setup(ctx: Context) -> str:
+    """
+    Check if Ink/Stitch is properly installed and ready for embroidery export.
+
+    Verifies that all required components are installed:
+    - Inkscape (vector graphics editor)
+    - Ink/Stitch (embroidery extension for Inkscape)
+
+    Returns:
+        Installation status with paths and instructions if components are missing
+
+    If components are missing, installation instructions are provided:
+    - Inkscape: https://inkscape.org/release/
+    - Ink/Stitch: https://inkstitch.org/docs/install/
+    """
+    result = check_inkstitch_installation()
+    return format_embroidery_response(result)
+
+
+@mcp.tool()
+def embroidery_simulate(
+    ctx: Context,
+    svg_path: str,
+    output_path: str = "",
+    realistic: bool = True,
+) -> str:
+    """
+    Generate a stitch simulation preview of an embroidery design.
+
+    Creates a visual preview showing how the embroidery will look
+    when stitched out. Useful for verifying designs before export.
+
+    Parameters:
+        svg_path: Path to input SVG file with embroidery elements
+        output_path: Path for output simulation SVG (optional, auto-generated if empty)
+        realistic: Use realistic thread rendering (default: True)
+
+    Returns:
+        Path to the generated simulation file
+
+    Note: Requires Inkscape and Ink/Stitch to be installed.
+    """
+    result = generate_stitch_simulation(
+        svg_path, output_path if output_path else None, realistic
+    )
+    return format_embroidery_response(result)
+
+
+@mcp.tool()
+def embroidery_format_info(ctx: Context, format: str) -> str:
+    """
+    Get detailed information about a specific embroidery format.
+
+    Parameters:
+        format: Format code (e.g., "dst", "pes", "jef")
+
+    Returns:
+        Detailed format specifications including:
+        - Full name and manufacturer
+        - Maximum design dimensions
+        - Maximum color count
+        - Trim/jump stitch support
+        - File extension
+    """
+    result = get_format_info(format)
+    return format_embroidery_response(result)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments for server configuration"""
+    parser = argparse.ArgumentParser(
+        description="Inkscape MCP Server - Control Inkscape and create embroidery designs via MCP",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run with stdio (default, for local MCP clients like Claude Desktop)
+  python inkscape_mcp_server.py
+
+  # Run with HTTP transport on localhost:8000
+  python inkscape_mcp_server.py --transport http
+
+  # Run with HTTP transport accessible from network
+  python inkscape_mcp_server.py --transport http --host 0.0.0.0 --port 9000
+
+  # Run with SSE transport (legacy)
+  python inkscape_mcp_server.py --transport sse --port 8000
+
+Transport modes:
+  stdio  - Standard I/O (default). Use for local MCP clients.
+  http   - HTTP with Streamable HTTP. Recommended for remote/network access.
+  sse    - Server-Sent Events. Legacy mode for older clients.
+        """,
+    )
+
+    parser.add_argument(
+        "--transport",
+        "-t",
+        choices=["stdio", "http", "sse"],
+        default="stdio",
+        help="Transport mode: stdio (default), http, or sse",
+    )
+
+    parser.add_argument(
+        "--host",
+        "-H",
+        default="127.0.0.1",
+        help="Host to bind to (default: 127.0.0.1). Use 0.0.0.0 for network access.",
+    )
+
+    parser.add_argument(
+        "--port", "-p", type=int, default=8000, help="Port to listen on (default: 8000)"
+    )
+
+    parser.add_argument(
+        "--log-level",
+        "-l",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Logging level (default: INFO)",
+    )
+
+    return parser.parse_args()
+
+
 def main():
-    """Run the Inkscape MCP server"""
+    """Run the Inkscape MCP server with configurable transport"""
+    args = parse_args()
+
+    # Configure logging level
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+
     logger.info("Starting Inkscape MCP Server...")
-    mcp.run()
+    logger.info(f"Transport: {args.transport}")
+
+    if args.transport == "stdio":
+        # Standard I/O mode (default for local MCP clients)
+        logger.info("Running in stdio mode")
+        mcp.run()
+
+    elif args.transport == "http":
+        # HTTP transport with Streamable HTTP (recommended for remote)
+        import uvicorn
+
+        logger.info(f"Running Streamable HTTP server on {args.host}:{args.port}")
+        logger.info(f"MCP endpoint: http://{args.host}:{args.port}/mcp")
+
+        # Get the Starlette ASGI app for streamable HTTP
+        app = mcp.streamable_http_app()
+
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level=args.log_level.lower(),
+        )
+
+    elif args.transport == "sse":
+        # SSE transport (legacy, for backward compatibility)
+        import uvicorn
+
+        logger.info(f"Running SSE server on {args.host}:{args.port}")
+        logger.info(f"SSE endpoint: http://{args.host}:{args.port}/sse")
+        logger.info(
+            "Note: SSE is legacy. Consider using HTTP transport for new projects."
+        )
+
+        # Get the Starlette ASGI app for SSE
+        app = mcp.sse_app()
+
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level=args.log_level.lower(),
+        )
+
+
+# ASGI app factory for production deployment with uvicorn/gunicorn
+# Usage: uvicorn inkscape_mcp_server:http_app --host 0.0.0.0 --port 8000
+def create_http_app():
+    """Factory function to create the Streamable HTTP ASGI app"""
+    return mcp.streamable_http_app()
+
+
+def create_sse_app():
+    """Factory function to create the SSE ASGI app"""
+    return mcp.sse_app()
+
+
+# Pre-created app instances for direct uvicorn usage
+# Usage: uvicorn inkscape_mcp_server:http_app --host 0.0.0.0 --port 8000
+http_app = mcp.streamable_http_app()
+sse_app = mcp.sse_app()
 
 
 if __name__ == "__main__":

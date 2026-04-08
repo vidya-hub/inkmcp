@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+     xmlns:inkstitch="http://inkstitch.org/namespace"
+     width="200mm" height="200mm" viewBox="0 0 200 200">
+  
+  <title>Filled Shape - Auto-Fill Stitch Example</title>
+  
+  <!-- 
+    This example demonstrates an auto-fill stitch for a closed shape.
+    The fill creates parallel rows of stitches across the shape.
+    
+    Parameters:
+    - fill_angle: Direction of stitches (45 degrees)
+    - row_spacing_mm: Distance between rows (0.25mm for dense fill)
+    - fill_underlay: Adds stabilizing underlay layer
+  -->
+  
+  <!-- Filled rectangle with auto-fill stitches -->
+  <path id="filled_rect"
+        d="M 60,60 L 140,60 L 140,140 L 60,140 Z"
+        fill="#DC2626"
+        stroke="none"
+        inkscape:label="Auto-Fill Rectangle"
+        inkstitch:fill_angle="45"
+        inkstitch:row_spacing_mm="0.25"
+        inkstitch:max_stitch_length_mm="3.0"
+        inkstitch:fill_underlay="true"
+        inkstitch:fill_underlay_angle="135"
+        inkstitch:fill_underlay_inset_mm="0.4"/>
+
+</svg>

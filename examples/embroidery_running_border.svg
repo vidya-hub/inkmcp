@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+     xmlns:inkstitch="http://inkstitch.org/namespace"
+     width="200mm" height="200mm" viewBox="0 0 200 200">
+  
+  <title>Simple Embroidery Border - Running Stitch Example</title>
+  
+  <!-- 
+    This example demonstrates a simple running stitch border around a rectangle.
+    The inkstitch namespace attributes configure the stitch parameters.
+    
+    To use:
+    1. Open in Inkscape with Ink/Stitch installed
+    2. Select the path
+    3. Use Extensions > Ink/Stitch > Visualize and Export > Stitch Plan Preview
+    4. Export via Extensions > Ink/Stitch > Export to machine format
+  -->
+  
+  <!-- Running stitch rectangle border -->
+  <path id="border_running"
+        d="M 50,50 L 150,50 L 150,150 L 50,150 Z"
+        fill="none"
+        stroke="#2563EB"
+        stroke-width="1"
+        inkscape:label="Running Stitch Border"
+        inkstitch:running_stitch_length_mm="2.5"
+        inkstitch:bean_stitch_repeats="0"/>
+
+</svg>
