@@ -918,9 +918,9 @@ def main():
     elif args.transport == "http":
         # HTTP transport with Streamable HTTP (recommended for remote)
         import uvicorn
-        from starlette.applications import Starlette
         from starlette.responses import JSONResponse
-        from starlette.routing import Route, Mount
+        from starlette.middleware import Middleware
+        from starlette.middleware.base import BaseHTTPMiddleware
 
         logger.info(f"Running Streamable HTTP server on {args.host}:{args.port}")
         logger.info(f"MCP endpoint: http://{args.host}:{args.port}/mcp")
@@ -929,22 +929,23 @@ def main():
         # Get the Starlette ASGI app for streamable HTTP
         mcp_app = mcp.streamable_http_app()
 
-        # Health check endpoint
-        async def health_check(request):
-            return JSONResponse(
-                {"status": "healthy", "service": "InkscapeMCP", "transport": "http"}
-            )
+        # Add health check middleware that intercepts /health requests
+        class HealthCheckMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):
+                if request.url.path == "/health":
+                    return JSONResponse(
+                        {
+                            "status": "healthy",
+                            "service": "InkscapeMCP",
+                            "transport": "http",
+                        }
+                    )
+                return await call_next(request)
 
-        # Create combined app with health check and MCP routes
-        app = Starlette(
-            routes=[
-                Route("/health", health_check, methods=["GET"]),
-                Mount("/", app=mcp_app),
-            ]
-        )
+        mcp_app.add_middleware(HealthCheckMiddleware)
 
         uvicorn.run(
-            app,
+            mcp_app,
             host=args.host,
             port=args.port,
             log_level=args.log_level.lower(),
@@ -953,9 +954,8 @@ def main():
     elif args.transport == "sse":
         # SSE transport (legacy, for backward compatibility)
         import uvicorn
-        from starlette.applications import Starlette
         from starlette.responses import JSONResponse
-        from starlette.routing import Route, Mount
+        from starlette.middleware.base import BaseHTTPMiddleware
 
         logger.info(f"Running SSE server on {args.host}:{args.port}")
         logger.info(f"SSE endpoint: http://{args.host}:{args.port}/sse")
@@ -967,22 +967,23 @@ def main():
         # Get the Starlette ASGI app for SSE
         sse_mcp_app = mcp.sse_app()
 
-        # Health check endpoint
-        async def health_check(request):
-            return JSONResponse(
-                {"status": "healthy", "service": "InkscapeMCP", "transport": "sse"}
-            )
+        # Add health check middleware that intercepts /health requests
+        class HealthCheckMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):
+                if request.url.path == "/health":
+                    return JSONResponse(
+                        {
+                            "status": "healthy",
+                            "service": "InkscapeMCP",
+                            "transport": "sse",
+                        }
+                    )
+                return await call_next(request)
 
-        # Create combined app with health check and SSE routes
-        app = Starlette(
-            routes=[
-                Route("/health", health_check, methods=["GET"]),
-                Mount("/", app=sse_mcp_app),
-            ]
-        )
+        sse_mcp_app.add_middleware(HealthCheckMiddleware)
 
         uvicorn.run(
-            app,
+            sse_mcp_app,
             host=args.host,
             port=args.port,
             log_level=args.log_level.lower(),
